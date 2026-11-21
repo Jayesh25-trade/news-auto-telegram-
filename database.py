@@ -1,6 +1,7 @@
 import aiosqlite
 import os
 import json
+import re
 from typing import List, Dict, Optional, Any
 from datetime import datetime
 
@@ -147,11 +148,16 @@ class Database:
                 return [dict(r) for r in rows]
 
     async def search_articles_fts(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
-        """Searches articles using FTS5 for RAG semantic/keyword retrieval."""
+        """Searches articles using FTS5 with fallback to LIKE query."""
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
-            # Clean query for FTS5 syntax
-            safe_query = '"' + query.replace('"', '""') + '"'
+            tokens = [w for w in re.sub(r'[^\w\s]', '', query).split() if len(w) >= 2]
+            if tokens:
+                fts_query = " OR ".join([f'"{t}"' for t in tokens])
+            else:
+                clean_q = query.replace('"', '""')
+                fts_query = f'"{clean_q}"'
+
             sql = """
                 SELECT a.* FROM news_articles a
                 JOIN news_fts f ON a.id = f.rowid
@@ -159,20 +165,23 @@ class Database:
                 ORDER BY a.id DESC LIMIT ?
             """
             try:
-                async with db.execute(sql, (safe_query, limit)) as cursor:
+                async with db.execute(sql, (fts_query, limit)) as cursor:
                     rows = await cursor.fetchall()
-                    return [dict(r) for r in rows]
+                    if rows:
+                        return [dict(r) for r in rows]
             except Exception:
-                # Fallback to LIKE if FTS expression parsing fails
-                fallback_sql = """
-                    SELECT * FROM news_articles
-                    WHERE title LIKE ? OR summary_hinglish LIKE ? OR state LIKE ?
-                    ORDER BY id DESC LIMIT ?
-                """
-                term = f"%{query}%"
-                async with db.execute(fallback_sql, (term, term, term, limit)) as cursor:
-                    rows = await cursor.fetchall()
-                    return [dict(r) for r in rows]
+                pass
+
+            # Fallback to LIKE if FTS returns nothing or fails
+            fallback_sql = """
+                SELECT * FROM news_articles
+                WHERE title LIKE ? OR summary_hinglish LIKE ? OR state LIKE ?
+                ORDER BY id DESC LIMIT ?
+            """
+            term = f"%{query}%"
+            async with db.execute(fallback_sql, (term, term, term, limit)) as cursor:
+                rows = await cursor.fetchall()
+                return [dict(r) for r in rows]
 
     async def get_user_preferences(self, user_id: int) -> Dict[str, Any]:
         async with aiosqlite.connect(self.db_path) as db:

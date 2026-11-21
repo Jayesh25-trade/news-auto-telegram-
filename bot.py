@@ -3,6 +3,8 @@ import sys
 import shutil
 import logging
 import threading
+import re
+import asyncio
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, time
 import pytz
@@ -32,6 +34,7 @@ from config import (
     ALLOWED_USER_IDS,
     NEWS_POLL_INTERVAL_MINUTES,
     MARKET_CHECK_INTERVAL_MINUTES,
+    MAX_BROADCAST_PER_POLL,
     TIMEZONE,
     DB_PATH,
     BACKUP_DIR
@@ -107,12 +110,17 @@ def is_in_quiet_hours(prefs: dict) -> bool:
 # ========================================================
 # News Processing & Distribution Job
 # ========================================================
+is_first_sync = True
+
 async def poll_news_job(app: Application):
-    """Fetches news, dedups, invokes Claude Hinglish analysis, saves to DB & alerts."""
+    """Fetches fresh news (past 24h only), dedups, invokes Hinglish analysis, saves to DB & alerts."""
+    global is_first_sync
     try:
         raw_articles = await scraper.fetch_all_feeds()
         if not raw_articles:
             return
+
+        new_saved_articles = []
 
         for raw in raw_articles:
             # Check DB URL Hash
@@ -148,15 +156,32 @@ async def poll_news_job(app: Application):
             }
 
             article_id = await db.insert_article(article_record)
+            article_record["id"] = article_id
             dedup.mark_seen(raw["title"], raw["source_url"])
+            new_saved_articles.append(article_record)
 
-            # Dispatch notification to allowed users
+        if not new_saved_articles:
+            return
+
+        # On initial boot, avoid spamming dozens of notifications at once!
+        # Only broadcast up to 3 highest priority items (score >= 4)
+        if is_first_sync:
+            is_first_sync = False
+            broadcast_list = [a for a in new_saved_articles if a.get("importance_score", 3) >= 4][:3]
+        else:
+            # Sort by importance and limit to MAX_BROADCAST_PER_POLL
+            new_saved_articles.sort(key=lambda x: (x.get("is_breaking", False), x.get("importance_score", 3)), reverse=True)
+            broadcast_list = new_saved_articles[:MAX_BROADCAST_PER_POLL]
+
+        # Dispatch notifications to allowed users
+        for article_record in broadcast_list:
+            article_id = article_record.get("id")
             for uid in ALLOWED_USER_IDS:
                 prefs = await db.get_user_preferences(uid)
                 importance = article_record["importance_score"]
                 is_breaking = article_record["is_breaking"]
 
-                # Quiet Hours Check: During quiet hours, only breaking (score 5) passes immediately
+                # Quiet Hours Check: During quiet hours, only breaking passes immediately
                 in_quiet = is_in_quiet_hours(prefs)
                 if in_quiet and not is_breaking:
                     await db.queue_for_digest(uid, article_id)
@@ -167,8 +192,8 @@ async def poll_news_job(app: Application):
                     await db.queue_for_digest(uid, article_id)
                     continue
 
-                # Min Importance Filter
-                if importance < prefs.get("min_importance", 2) and not is_breaking:
+                # Min Importance Filter (default min 3)
+                if importance < prefs.get("min_importance", 3) and not is_breaking:
                     continue
 
                 # State Filter
@@ -194,7 +219,7 @@ async def poll_news_job(app: Application):
                         InlineKeyboardButton("🔗 Source", url=article_record["source_url"])
                     ]
                 ]
-                if article_record["image_url"]:
+                if article_record.get("image_url"):
                     keyboard[0].insert(1, InlineKeyboardButton("🖼️ Image", callback_data=f"img_{article_id}"))
 
                 try:
@@ -205,6 +230,7 @@ async def poll_news_job(app: Application):
                         reply_markup=InlineKeyboardMarkup(keyboard),
                         disable_web_page_preview=True
                     )
+                    await asyncio.sleep(1.0)
                 except Exception as e:
                     logger.error(f"Failed to send telegram news message to {uid}: {e}")
 
@@ -479,7 +505,11 @@ Settings change karne ke liye format:
 # ========================================================
 async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    # Protect against expired query timeout
+    try:
+        await query.answer()
+    except Exception as e:
+        logger.debug(f"Query answer error/timeout: {e}")
 
     data = query.data
     if data.startswith("full_"):
@@ -489,9 +519,12 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
             await query.edit_message_reply_markup(reply_markup=None)
             return
 
-        status_msg = await query.message.reply_text("🤖 Claude AI is preparing deep-dive analysis in Hinglish...")
+        status_msg = await query.message.reply_text("🤖 AI deep-dive analysis generate ho raha hai... Kripya thoda wait karein.")
         analysis = await ai.rag_deep_dive(article)
-        await status_msg.edit_text(analysis, parse_mode=ParseMode.MARKDOWN)
+        try:
+            await status_msg.edit_text(analysis, parse_mode=ParseMode.MARKDOWN)
+        except Exception:
+            await status_msg.edit_text(analysis)
 
     elif data.startswith("img_"):
         article_id = int(data.split("_")[1])
@@ -503,21 +536,88 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
                 await query.message.reply_text("Image preview load nahi ho paayi.")
 
 # ========================================================
-# Freeform AI Chatbot Message Handler (RAG Q&A)
+# Freeform AI Chatbot Message Handler (RAG Q&A + Live Search)
 # ========================================================
 async def chat_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_authorized(user_id):
         return
 
-    user_text = update.message.text
-    # 1. Search database for relevant context using FTS5
-    relevant_articles = await db.search_articles_fts(user_text, limit=4)
+    user_text = (update.message.text or "").strip()
+    if not user_text:
+        return
 
-    # 2. Let Claude answer with Hinglish RAG
-    status_msg = await update.message.reply_text("🔍 Analyzing intelligence database...")
+    lower_text = user_text.lower()
+
+    # 1. Greetings Intent
+    if lower_text in ["hi", "hello", "hey", "namaste", "pranam", "kya haal hai", "kaise ho", "help"]:
+        welcome_reply = (
+            "👋 **Namaste! Main aapka 24x7 News & Market AI Assistant hoon.**\n\n"
+            "Aaj **21 Nov 2026** ki taaza khabrein aur live updates ke liye aap yeh try kar sakte hain:\n"
+            "• `/latest` - Top 5 latest news updates\n"
+            "• `/market` - Live Nifty, Sensex, Gold & Commodities\n"
+            "• Ya direct kisi topic/sheher ka naam likhein (jaise: *'Shegaon news'*, *'Maharashtra news'*, *'Nifty view'*)\n"
+            "• Ya 'Next news' bolkar aur khabrein dekhein."
+        )
+        await update.message.reply_text(welcome_reply, parse_mode=ParseMode.MARKDOWN)
+        return
+
+    # 2. Next / More News Intent
+    if any(k in lower_text for k in ["next news", "aur news", "more news", "latest news", "aur batao", "next"]):
+        recent = await db.get_recent_articles(limit=4)
+        if recent:
+            await update.message.reply_text("📰 **Taaza News Updates (Today):**", parse_mode=ParseMode.MARKDOWN)
+            for a in recent:
+                tag = "🔴 BREAKING" if a["is_breaking"] else f"🟡 [{a['importance_score']}/5]"
+                text = f"{tag} | 📍 **{a['state']}**\n📰 **{a['title']}**\n\n{a['summary_hinglish']}"
+                kb = [[InlineKeyboardButton("📖 Full News (AI)", callback_data=f"full_{a['id']}"),
+                       InlineKeyboardButton("🔗 Source", url=a['source_url'])]]
+                await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(kb), disable_web_page_preview=True)
+            return
+
+    status_msg = await update.message.reply_text("🔍 Jankari check kar raha hoon...")
+
+    # 3. Clean search term for topic/location query (e.g., 'Shegaon news ?' -> 'Shegaon')
+    clean_topic = re.sub(r'[^\w\s]', '', lower_text)
+    clean_topic = re.sub(r'\b(news|khabar|update|updates|samachar|today|aaj|ki|ka|batao|kya|hai)\b', '', clean_topic).strip()
+
+    search_query = clean_topic if clean_topic else user_text
+    relevant_articles = await db.search_articles_fts(search_query, limit=4)
+
+    # 4. If no DB articles found and user queried a topic/city (e.g., 'Shegaon'), fetch live news dynamically!
+    if not relevant_articles and clean_topic and len(clean_topic) >= 3:
+        try:
+            live_items = await scraper.fetch_topic_news(clean_topic, limit=3)
+            if live_items:
+                for item in live_items:
+                    ai_data = await ai.analyze_and_summarize(item["title"], item.get("initial_summary", ""), clean_topic.title())
+                    item_rec = {
+                        "url_hash": item["url_hash"],
+                        "title": item["title"],
+                        "source_url": item["source_url"],
+                        "source_name": item["source_name"],
+                        "published_at": item["published_at"],
+                        "state": ai_data.get("state", clean_topic.title()),
+                        "category": ai_data.get("category", "General"),
+                        "importance_score": ai_data.get("importance_score", 3),
+                        "is_breaking": ai_data.get("is_breaking", False),
+                        "summary_hinglish": ai_data.get("summary_hinglish", item["title"]),
+                        "full_content": item.get("initial_summary", ""),
+                        "image_url": item.get("image_url"),
+                        "dedup_hash": dedup.normalize_text(item["title"])
+                    }
+                    art_id = await db.insert_article(item_rec)
+                    item_rec["id"] = art_id
+                    relevant_articles.append(item_rec)
+        except Exception as e:
+            logger.debug(f"Dynamic topic news search error: {e}")
+
+    # 5. Let AI respond with RAG context or general knowledge in conversational Hinglish
     reply = await ai.answer_general_query_with_rag(user_text, relevant_articles)
-    await status_msg.edit_text(reply, parse_mode=ParseMode.MARKDOWN)
+    try:
+        await status_msg.edit_text(reply, parse_mode=ParseMode.MARKDOWN)
+    except Exception:
+        await status_msg.edit_text(reply)
 
 # ========================================================
 # Error Handler & Crash Notifications

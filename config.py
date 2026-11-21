@@ -14,7 +14,7 @@ ALLOWED_USER_IDS: List[int] = [
 
 # AI Configuration (Gemini default, Anthropic Claude optional)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-3-5-sonnet-20241022")
 
@@ -25,6 +25,11 @@ DIGEST_INTERVAL_MINUTES = int(os.getenv("DIGEST_INTERVAL_MINUTES", "30"))
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Kolkata")
 DB_PATH = os.getenv("DB_PATH", "data/intelligence_bot.db")
 BACKUP_DIR = os.getenv("BACKUP_DIR", "data/backups")
+
+# Filtering and Rate Limiting Parameters
+MAX_HOURS_OLD = int(os.getenv("MAX_HOURS_OLD", "24"))
+MAX_ARTICLES_PER_FEED = int(os.getenv("MAX_ARTICLES_PER_FEED", "3"))
+MAX_BROADCAST_PER_POLL = int(os.getenv("MAX_BROADCAST_PER_POLL", "5"))
 
 # All 28 Indian States & 8 UTs for coverage
 INDIAN_STATES_AND_UTS = [
@@ -62,9 +67,10 @@ RSS_FEEDS: List[Dict[str, str]] = [
     {"name": "Business Standard", "url": "https://www.business-standard.com/rss/markets-106.rss", "region": "Financial", "type": "market"},
 ]
 
-def get_google_news_rss(query: str) -> str:
+def get_google_news_rss(query: str, time_window: str = "when:1d") -> str:
     from urllib.parse import quote_plus
-    return f"https://news.google.com/rss/search?q={quote_plus(query)}&hl=en-IN&gl=IN&ceid=IN:en"
+    full_q = f"{query} {time_window}".strip() if time_window else query
+    return f"https://news.google.com/rss/search?q={quote_plus(full_q)}&hl=en-IN&gl=IN&ceid=IN:en"
 
 # Add State Queries
 for state in INDIAN_STATES_AND_UTS:
