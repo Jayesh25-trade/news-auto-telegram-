@@ -103,10 +103,10 @@ class NewsScraper:
             return {"full_text": "", "image_url": None}
 
     async def fetch_all_feeds(self) -> List[Dict[str, Any]]:
-        """Fetches all registered feeds concurrently with bounded concurrency."""
+        """Fetches all registered feeds concurrently with bounded concurrency to preserve RAM on free cloud tiers."""
         tasks = [self.fetch_feed(f) for f in RSS_FEEDS]
-        # Batch in chunks of 15 to avoid overwhelming network
-        chunk_size = 15
+        # Low concurrency chunk size of 3 prevents OOM on Render 512MB tier
+        chunk_size = 3
         all_results = []
         for i in range(0, len(tasks), chunk_size):
             chunk = tasks[i:i + chunk_size]
@@ -114,5 +114,7 @@ class NewsScraper:
             for res in results:
                 if isinstance(res, list):
                     all_results.extend(res)
+            # Brief pause to yield event loop and release memory
+            await asyncio.sleep(0.2)
 
         return all_results

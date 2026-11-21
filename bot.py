@@ -60,10 +60,14 @@ scheduler = AsyncIOScheduler(timezone=pytz.timezone(TIMEZONE))
 # Healthcheck Server for Render/Uptime Keep-Alive
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200)
-        self.send_header('Content-type', 'text/plain; charset=utf-8')
-        self.end_headers()
-        self.wfile.write(b"24x7 News & Market Intelligence Bot is Running! OK")
+        try:
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain; charset=utf-8')
+            self.send_header('Content-Length', '48')
+            self.end_headers()
+            self.wfile.write(b"24x7 News & Market Intelligence Bot is Running! OK")
+        except Exception:
+            pass
 
     def log_message(self, format, *args):
         pass
@@ -624,7 +628,7 @@ def main():
     port = int(os.getenv("PORT", "10000"))
     threading.Thread(target=run_health_server, args=(port,), daemon=True).start()
 
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).job_queue(None).post_init(post_init).build()
 
     # Commands
     app.add_handler(CommandHandler("start", cmd_start))
@@ -649,7 +653,14 @@ def main():
     app.add_error_handler(error_handler)
 
     logger.info("Bot polling initiated...")
-    app.run_polling(drop_pending_updates=True)
+    while True:
+        try:
+            app.run_polling(drop_pending_updates=True)
+            break
+        except Exception as e:
+            logger.error(f"Polling loop encountered an error: {e}. Retrying in 5s...", exc_info=True)
+            import time as py_time
+            py_time.sleep(5)
 
 if __name__ == "__main__":
     main()
