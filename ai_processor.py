@@ -3,7 +3,11 @@ import logging
 import asyncio
 from typing import Dict, Any, Optional, List
 import httpx
-import anthropic
+
+try:
+    import anthropic
+except ImportError:
+    anthropic = None
 
 from config import GEMINI_API_KEY, GEMINI_MODEL, ANTHROPIC_API_KEY, CLAUDE_MODEL
 
@@ -13,7 +17,11 @@ class AIProcessor:
     def __init__(self):
         self.gemini_key = GEMINI_API_KEY
         self.gemini_model = GEMINI_MODEL
-        self.claude_client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
+        self.claude_client = (
+            anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+            if (anthropic and ANTHROPIC_API_KEY)
+            else None
+        )
         self.http_client = httpx.AsyncClient(timeout=30.0)
 
     async def _call_llm(self, prompt: str) -> str:
