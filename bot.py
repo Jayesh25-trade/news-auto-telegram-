@@ -2,6 +2,8 @@ import os
 import sys
 import shutil
 import logging
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, time
 import pytz
 
@@ -54,6 +56,25 @@ scraper = NewsScraper(dedup)
 ai = AIProcessor()
 market = MarketService()
 scheduler = AsyncIOScheduler(timezone=pytz.timezone(TIMEZONE))
+
+# Healthcheck Server for Render/Uptime Keep-Alive
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain; charset=utf-8')
+        self.end_headers()
+        self.wfile.write(b"24x7 News & Market Intelligence Bot is Running! OK")
+
+    def log_message(self, format, *args):
+        pass
+
+def run_health_server(port: int = 10000):
+    try:
+        server = HTTPServer(('0.0.0.0', port), HealthHandler)
+        logger.info(f"Health-check web server listening on port {port} (Render ready)")
+        server.serve_forever()
+    except Exception as e:
+        logger.warning(f"Could not bind health server on port {port}: {e}")
 
 # Helper: Authorization Check
 def is_authorized(user_id: int) -> bool:
@@ -582,20 +603,6 @@ async def post_init(application: Application):
     scheduler.start()
     logger.info("APScheduler started with all 24x7 monitoring routines.")
 
-    # Start Lightweight HTTP Server for Render/Koyeb Keep-Alive Ping
-    port = int(os.getenv("PORT", "10000"))
-    async def handle_ping(request):
-        return web.Response(text="24x7 News & Market Intelligence Bot is Running! 🚀")
-
-    web_app = web.Application()
-    web_app.router.add_get("/", handle_ping)
-    web_app.router.add_get("/health", handle_ping)
-    runner = web.AppRunner(web_app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-    logger.info(f"Health-check web server listening on port {port} (Render ready)")
-
     # Boot Alert on Telegram
     for uid in ALLOWED_USER_IDS:
         try:
@@ -610,6 +617,10 @@ def main():
     if not TELEGRAM_BOT_TOKEN:
         print("ERROR: TELEGRAM_BOT_TOKEN is not set in .env! Exiting.")
         sys.exit(1)
+
+    # Start healthcheck server immediately in background thread for Render/Koyeb
+    port = int(os.getenv("PORT", "10000"))
+    threading.Thread(target=run_health_server, args=(port,), daemon=True).start()
 
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
 

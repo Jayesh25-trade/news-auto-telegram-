@@ -28,4 +28,6 @@ COPY . .
 # Create volume mount directories
 RUN mkdir -p data/backups
 
+EXPOSE 10000
+
 CMD ["python", "bot.py"]
