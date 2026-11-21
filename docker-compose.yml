@@ -1,0 +1,16 @@
+services:
+  news-market-bot:
+    build: .
+    container_name: news_market_bot
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    environment:
+      - TZ=Asia/Kolkata
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
