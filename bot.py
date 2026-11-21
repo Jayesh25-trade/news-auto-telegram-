@@ -69,12 +69,14 @@ class HealthHandler(BaseHTTPRequestHandler):
         pass
 
 def run_health_server(port: int = 10000):
-    try:
-        server = HTTPServer(('0.0.0.0', port), HealthHandler)
-        logger.info(f"Health-check web server listening on port {port} (Render ready)")
-        server.serve_forever()
-    except Exception as e:
-        logger.warning(f"Could not bind health server on port {port}: {e}")
+    for p in [port, 10000, 8080, 80]:
+        try:
+            server = HTTPServer(('0.0.0.0', p), HealthHandler)
+            logger.info(f"Health-check web server listening on port {p} (Render ready)")
+            server.serve_forever()
+            break
+        except Exception as e:
+            logger.debug(f"Port {p} not available: {e}")
 
 # Helper: Authorization Check
 def is_authorized(user_id: int) -> bool:
